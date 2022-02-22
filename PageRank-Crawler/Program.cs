@@ -12,7 +12,7 @@ namespace PageRankCrawler
     {
         public static void Main(string[] args)
         {
-            var graphClient = new GraphClient(new Uri("http://localhost:7474/db/data/"), "neo4j", "neo4j");
+            var graphClient = new GraphClient(new Uri("http://localhost:7474/db/data/"), "neo4j", "P@ssw0rd1");
             graphClient.ConnectAsync().ConfigureAwait(false).GetAwaiter().GetResult();
 
             var serviceProvider = new ServiceCollection()
@@ -23,14 +23,20 @@ namespace PageRankCrawler
             MainAsync(serviceProvider).GetAwaiter().GetResult();
         }
 
-        private static readonly Uri BaseUri = new Uri("https://wikipedia.org");
+        private static readonly Uri BaseUri = new("https://premierpups.com");
         private static readonly HashSet<string> linkBag = new();
+        private static readonly HashSet<string> keywords = new();
         private static readonly ConcurrentQueue<string> links = new(new List<string> { BaseUri.ToString() });
 
         private static async Task MainAsync(ServiceProvider serviceProvider)
         {
-            var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<Program>();
+            var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+            var logger = loggerFactory.CreateLogger<Program>();
             var graphClient = serviceProvider.GetRequiredService<IGraphClient>();
+
+            var uniqueKeywords = await CreateKeywordNodesAsync(loggerFactory, graphClient);
+            foreach (var keyword in uniqueKeywords)
+                keywords.Add(keyword);
 
             logger.LogInformation("Starting scrape!");
 
@@ -49,6 +55,7 @@ namespace PageRankCrawler
                 .WithParam("newPage", newPage)
                 .ExecuteWithoutResultsAsync();
 
+            //TODO: mutlithreading
             while (links.TryDequeue(out var nextUrl))
             {
                 try
@@ -57,14 +64,22 @@ namespace PageRankCrawler
                     var pageNav = await page.GoToAsync(nextUrl);
                     //pageNav.Status
 
+                    //TODO: record if we got a non-200 status code
+
                     var metrics = await page.MetricsAsync();
-                    var anchors = @"Array.from(document.querySelectorAll('a')).map(a => a.href.toLowerCase());";
-                    var urls = await page.EvaluateExpressionAsync<string[]>(anchors);
+                    var urls = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.href);");
+
+                    //TODO: handle case where page has a canonical link that points to a page different than itself
 
                     foreach (string url in urls)
                     {
+                        var cleanUrl = url.ToLower().TrimEnd(' ', '/');
+                        int index = cleanUrl.IndexOf("#");
+                        if (index >= 0)
+                            cleanUrl = cleanUrl[..index];
+
                         //TODO: Create relationships (and optionally target nodes) from {nextUrl} node to to all nodes in {urls}
-                        var targetPage = new PageInfo { Url = url.TrimEnd(' ', '/') };
+                        var targetPage = new PageInfo { Url = cleanUrl };
                         await graphClient.Cypher
                             .Match("(existingPage:Page)")
                             .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
@@ -78,13 +93,48 @@ namespace PageRankCrawler
                             {
                                 linkInfo = new LinkInfo { },
                                 targetPage,
-                                url = url.TrimEnd(' ', '/')
+                                url = cleanUrl
                             })
                             .ExecuteWithoutResultsAsync();
 
-                        if (!string.IsNullOrWhiteSpace(url) && Uri.IsWellFormedUriString(url, UriKind.RelativeOrAbsolute) && BaseUri.IsBaseOf(new Uri(url)))
-                            if (linkBag.Add(url.TrimEnd(' ', '/')))
-                                links.Enqueue(url.TrimEnd(' ', '/'));
+                        //TODO: exclude loading images?
+                        if (!string.IsNullOrWhiteSpace(cleanUrl) && Uri.IsWellFormedUriString(cleanUrl, UriKind.RelativeOrAbsolute) && BaseUri.IsBaseOf(new Uri(cleanUrl)))
+                            if (linkBag.Add(cleanUrl))
+                                links.Enqueue(cleanUrl);
+                    }
+
+                    //TODO: Create relationships + score to keywords if found on page
+                    var anchorKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.innerText);");
+                    var headingKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.innerText);");
+                    var metaKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('title,meta[name=Description]')).map(a => a.innerText || a.content);");
+                    var imgKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt);");
+                    var pageContent = await page.GetContentAsync();
+                    foreach (var word in keywords)
+                    {
+                        var score = 0;
+                        score += anchorKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 4 : 0;
+                        score += headingKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 4 : 0;
+                        score += metaKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 5 : 0;
+                        score += imgKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 3 : 0;
+                        if (score == 0)
+                            score = pageContent.Contains(word, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
+                        if (score > 0)
+                        {
+                            await graphClient.Cypher
+                                .Match("(existingPage:Page)")
+                                .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+                                
+                                .Match("(keyword:Keyword)")
+                                .Where((KeywordInfo keyword) => keyword.Keyword == word)
+
+                                .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
+                                .WithParams(new
+                                {
+                                    linkInfo = new KeywordLinkInfo { Score = score }
+                                })
+                                .ExecuteWithoutResultsAsync();
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -92,8 +142,36 @@ namespace PageRankCrawler
                     logger.LogError(ex, "Error navigating to url");
                 }
             }
-            logger.LogInformation("Done");
+            logger.LogInformation("Done scraping");
+
+            //TODO: merge canonical pages?
+
+
+            //TODO: calculate Page Rank
+            //https://neo4j.com/docs/graph-data-science/current/algorithms/page-rank/
+
+
             Console.ReadKey();
+        }
+
+        private static async Task<IEnumerable<string>> CreateKeywordNodesAsync(ILoggerFactory loggerFactory, IGraphClient graphClient)
+        {
+            var logger = loggerFactory.CreateLogger<Program>();
+            logger.LogInformation("Creating keyword nodes");
+
+            var keywords = await File.ReadAllLinesAsync("keywords.txt");
+            var uniqueKeywords = keywords.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.ToLower().Trim()).Distinct();
+            foreach (var keyword in uniqueKeywords)
+            {
+                var keywordInfo = new KeywordInfo { Keyword = keyword };
+
+                await graphClient.Cypher
+                .Create("(keyword:Keyword {keyword})")
+                .WithParam("keyword", keywordInfo)
+                .ExecuteWithoutResultsAsync();
+            }
+
+            return uniqueKeywords;
         }
     }
 }

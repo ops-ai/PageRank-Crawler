@@ -16,4 +16,10 @@
     <PackageReference Include="PuppeteerSharp" Version="6.2.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="keywords.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
