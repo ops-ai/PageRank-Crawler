@@ -25,7 +25,8 @@ namespace PageRankCrawler
 
         private static readonly Uri BaseUri = new("https://premierpups.com");
         private static readonly HashSet<string> linkBag = new();
-        private static readonly HashSet<string> keywords = new();
+        private static AhoCorasick.Trie trie = new();
+        AhoCorasick.Trie<string, bool> trie2 = new AhoCorasick.Trie<string, bool>();
         private static readonly ConcurrentQueue<string> links = new(new List<string> { BaseUri.ToString() });
 
         private static async Task MainAsync(ServiceProvider serviceProvider)
@@ -36,7 +37,8 @@ namespace PageRankCrawler
 
             var uniqueKeywords = await CreateKeywordNodesAsync(loggerFactory, graphClient);
             foreach (var keyword in uniqueKeywords)
-                keywords.Add(keyword);
+                trie.Add(keyword);
+            trie.Build();
 
             logger.LogInformation("Starting scrape!");
 
@@ -104,37 +106,53 @@ namespace PageRankCrawler
                     }
 
                     //TODO: Create relationships + score to keywords if found on page
-                    var anchorKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.innerText);");
-                    var headingKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.innerText);");
-                    var metaKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('title,meta[name=Description]')).map(a => a.innerText || a.content);");
-                    var imgKeywords = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt);");
-                    var pageContent = await page.GetContentAsync();
-                    foreach (var word in keywords)
-                    {
-                        var score = 0;
-                        score += anchorKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 4 : 0;
-                        score += headingKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 4 : 0;
-                        score += metaKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 5 : 0;
-                        score += imgKeywords.Any(x => x.Contains(word, StringComparison.OrdinalIgnoreCase)) ? 3 : 0;
-                        if (score == 0)
-                            score = pageContent.Contains(word, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
 
-                        if (score > 0)
-                        {
+                    var keywordSources = new List<(string tag, string[] data, int score)>();
+                    keywordSources.Add(new ("a", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.innerText);"), 4));
+                    keywordSources.Add(new("h", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.innerText);"), 4));
+                    keywordSources.Add(new("meta", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('title,meta[name=Description]')).map(a => a.innerText || a.content);"), 5));
+                    keywordSources.Add(new("img", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt);"), 3));
+
+                    foreach (var (tag, data, score) in keywordSources)
+                    {
+                        var alreadyLinked = new HashSet<string>();
+                        foreach (var element in data)
+                            foreach (string word in trie.Find(element))
+                            {
+                                if (alreadyLinked.Add(word))
+                                    await graphClient.Cypher
+                                        .Match("(existingPage:Page)")
+                                        .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+
+                                        .Match("(keyword:Keyword)")
+                                        .Where((KeywordInfo keyword) => keyword.Keyword == word)
+
+                                        .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
+                                        .WithParams(new
+                                        {
+                                            linkInfo = new KeywordLinkInfo { Type = tag, Score = score }
+                                        })
+                                        .ExecuteWithoutResultsAsync();
+                            }
+                    }
+
+                    var alreadyLinkedContent = new HashSet<string>();
+                    foreach (string word in trie.Find(await page.GetContentAsync()))
+                    {
+                        if (alreadyLinkedContent.Add(word))
                             await graphClient.Cypher
                                 .Match("(existingPage:Page)")
                                 .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
-                                
+
                                 .Match("(keyword:Keyword)")
                                 .Where((KeywordInfo keyword) => keyword.Keyword == word)
 
                                 .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
                                 .WithParams(new
                                 {
-                                    linkInfo = new KeywordLinkInfo { Score = score }
+                                    linkInfo = new KeywordLinkInfo { Type = "content", Score = 1 }
                                 })
                                 .ExecuteWithoutResultsAsync();
-                        }
                     }
                 }
                 catch (Exception ex)
