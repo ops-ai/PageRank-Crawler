@@ -51,7 +51,7 @@ namespace PageRankCrawler
 
             var tasks = new List<Task>();
             for (var i = 0; i < Environment.ProcessorCount; i++)
-                tasks.Add(ProcessLinksAsync(serviceProvider));
+                tasks.Add(ProcessLinksAsync(serviceProvider, i));
 
             Task.WaitAll(tasks.ToArray());
 
@@ -67,76 +67,89 @@ namespace PageRankCrawler
 
             Console.ReadKey();
         }
-        private static async Task ProcessLinksAsync(ServiceProvider serviceProvider)
+
+        private static async Task ProcessLinksAsync(ServiceProvider serviceProvider, int threadId)
         {
             var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
             var logger = loggerFactory.CreateLogger<Program>();
-            var graphClient = serviceProvider.GetRequiredService<IGraphClient>();
 
-            var options = new LaunchOptions()
+            try
             {
-                Headless = true,
-                ExecutablePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                Product = Product.Chrome
-            };
-            var browser = await Puppeteer.LaunchAsync(options);
-            var page = await browser.NewPageAsync();
+                var graphClient = serviceProvider.GetRequiredService<IGraphClient>();
 
-            var tryLimit = 5;
-            var currentTry = 0;
+                logger.LogInformation("{thread} starting", threadId);
 
-            while (currentTry < tryLimit)
-            {
-                while (links.TryDequeue(out var nextUrl))
+                var options = new LaunchOptions()
                 {
-                    currentTry = 0;
-                    try
+                    Headless = true,
+                    ExecutablePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    Product = Product.Chrome
+                };
+                var browser = await Puppeteer.LaunchAsync(options);
+                var page = await browser.NewPageAsync();
+
+                var tryLimit = 5;
+                var currentTry = 0;
+
+                while (currentTry < tryLimit)
+                {
+                    while (links.TryDequeue(out var nextUrl))
                     {
-                        logger.LogInformation("Getting url {nextUrl}", nextUrl);
-                        var pageNav = await page.GoToAsync(nextUrl);
-                        //pageNav.Status
-
-                        //TODO: record if we got a non-200 status code
-
-                        var metrics = await page.MetricsAsync();
-                        var urls = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.href);");
-
-                        //TODO: handle case where page has a canonical link that points to a page different than itself
-
-                        foreach (string url in urls)
+                        currentTry = 0;
+                        try
                         {
-                            var cleanUrl = url.ToLower().TrimEnd(' ', '/');
-                            int index = cleanUrl.IndexOf("#");
-                            if (index >= 0)
-                                cleanUrl = cleanUrl[..index];
+                            logger.LogInformation("{threadId} Getting url {nextUrl}", threadId, nextUrl);
+                            var pageNav = await page.GoToAsync(nextUrl);
+                            //pageNav.Status
 
-                            //TODO: Create relationships (and optionally target nodes) from {nextUrl} node to to all nodes in {urls}
-                            var targetPage = new PageInfo { Url = cleanUrl };
-                            await graphClient.Cypher
-                                .Match("(existingPage:Page)")
-                                .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+                            //TODO: record if we got a non-200 status code
 
-                                .Merge("(targetPage:Page { Url: {url} })")
+                            var metrics = await page.MetricsAsync();
+                            var urls = await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.href);");
+
+                            //TODO: handle case where page has a canonical link that points to a page different than itself
+
+                            foreach (var url in urls.Select(t => (t.Contains('#') ? t[..t.IndexOf('#')] : t).ToLower().TrimEnd(' ', '/')).GroupBy(t => t))
+                            {
+                                var cleanUrl = url.First();
+                                if (string.IsNullOrWhiteSpace(cleanUrl) || !Uri.IsWellFormedUriString(cleanUrl, UriKind.RelativeOrAbsolute))
+                                    continue;
+
+                                //TODO: exclude loading images?
+                                if (!string.IsNullOrWhiteSpace(cleanUrl) && Uri.IsWellFormedUriString(cleanUrl, UriKind.RelativeOrAbsolute) && BaseUri.IsBaseOf(new Uri(cleanUrl)))
+                                    if (linkBag.Add(cleanUrl))
+                                        links.Enqueue(cleanUrl);
+
+                                //TODO: Create relationships (and optionally target nodes) from {nextUrl} node to to all nodes in {urls}
+                                var targetPage = new PageInfo { Url = cleanUrl };
+                                await graphClient.Cypher
+                                    .Merge("(targetPage:Page { Url: {url} })")
                                     .OnCreate()
                                     .Set("targetPage = {targetPage}")
+                                    .WithParams(new
+                                    {
+                                        url = targetPage.Url,
+                                        targetPage
+                                    })
+                                    .ExecuteWithoutResultsAsync();
 
-                                .Create("(existingPage)-[:LINKS {linkInfo}]->(targetPage)")
-                                .WithParams(new
-                                {
-                                    linkInfo = new LinkInfo { },
-                                    targetPage,
-                                    url = targetPage.Url
-                                }).ExecuteWithoutResultsAsync();
 
-                            //TODO: exclude loading images?
-                            if (!string.IsNullOrWhiteSpace(cleanUrl) && Uri.IsWellFormedUriString(cleanUrl, UriKind.RelativeOrAbsolute) && BaseUri.IsBaseOf(new Uri(cleanUrl)))
-                                if (linkBag.Add(cleanUrl))
-                                    links.Enqueue(cleanUrl);
-                        }
+                                await graphClient.Cypher
+                                    .Match("(existingPage:Page)")
+                                    .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+                                    .Match("(targetPage:Page)")
+                                    .Where((PageInfo targetPage) => targetPage.Url == cleanUrl)
+                                    .Create("(existingPage)-[:LINKS {linkInfo}]->(targetPage)")
+                                    .WithParams(new
+                                    {
+                                        linkInfo = new LinkInfo { }
+                                    }).ExecuteWithoutResultsAsync();
 
-                        //TODO: Create relationships + score to keywords if found on page
+                            }
 
-                        var keywordSources = new List<(string tag, string[] data, int score)>
+                            //TODO: Create relationships + score to keywords if found on page
+
+                            var keywordSources = new List<(string tag, string[] data, int score)>
                         {
                             new("a", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
                             new("h", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
@@ -144,55 +157,62 @@ namespace PageRankCrawler
                             new("img", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 3)
                         };
 
-                        foreach (var (tag, data, score) in keywordSources)
-                        {
-                            var alreadyLinked = new HashSet<string>();
-                            foreach (var element in data)
-                                foreach (string word in trie.Find(element))
-                                {
-                                    if (alreadyLinked.Add(word))
-                                        await graphClient.Cypher
-                                            .Match("(existingPage:Page)")
-                                            .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
-
-                                            .Match("(keyword:Keyword)")
-                                            .Where((KeywordInfo keyword) => keyword.Keyword == word)
-
-                                            .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
-                                            .WithParams(new
-                                            {
-                                                linkInfo = new KeywordLinkInfo { Type = tag, Score = score }
-                                            })
-                                            .ExecuteWithoutResultsAsync();
-                                }
-                        }
-
-                        var alreadyLinkedContent = new HashSet<string>();
-                        foreach (string word in trie.Find(await page.GetContentAsync()))
-                        {
-                            if (alreadyLinkedContent.Add(word))
-                                await graphClient.Cypher
-                                    .Match("(existingPage:Page)")
-                                    .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
-
-                                    .Match("(keyword:Keyword)")
-                                    .Where((KeywordInfo keyword) => keyword.Keyword == word)
-
-                                    .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
-                                    .WithParams(new
+                            foreach (var (tag, data, score) in keywordSources)
+                            {
+                                var alreadyLinked = new HashSet<string>();
+                                foreach (var element in data)
+                                    foreach (string word in trie.Find(element))
                                     {
-                                        linkInfo = new KeywordLinkInfo { Type = "content", Score = 1 }
-                                    })
-                                    .ExecuteWithoutResultsAsync();
+                                        if (alreadyLinked.Add(word))
+                                            await graphClient.Cypher
+                                                .Match("(existingPage:Page)")
+                                                .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+
+                                                .Match("(keyword:Keyword)")
+                                                .Where((KeywordInfo keyword) => keyword.Keyword == word)
+
+                                                .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
+                                                .WithParams(new
+                                                {
+                                                    linkInfo = new KeywordLinkInfo { Type = tag, Score = score }
+                                                })
+                                                .ExecuteWithoutResultsAsync();
+                                    }
+                            }
+
+                            var alreadyLinkedContent = new HashSet<string>();
+                            foreach (string word in trie.Find(await page.GetContentAsync()))
+                            {
+                                if (alreadyLinkedContent.Add(word))
+                                    await graphClient.Cypher
+                                        .Match("(existingPage:Page)")
+                                        .Where((PageInfo existingPage) => existingPage.Url == nextUrl)
+
+                                        .Match("(keyword:Keyword)")
+                                        .Where((KeywordInfo keyword) => keyword.Keyword == word)
+
+                                        .Create("(existingPage)-[:KEYUSED {linkInfo}]->(keyword)")
+                                        .WithParams(new
+                                        {
+                                            linkInfo = new KeywordLinkInfo { Type = "content", Score = 1 }
+                                        })
+                                        .ExecuteWithoutResultsAsync();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogError(ex, "Error navigating to url");
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Error navigating to url");
-                    }
+                    currentTry++;
+                    await Task.Delay(1000);
+                    logger.LogInformation("{thread} pausing", threadId);
                 }
-                currentTry++;
-                await Task.Delay(1000);
+                logger.LogInformation("{thread} ending", threadId);
+            }
+            catch (Exception e)
+            {
+                logger.LogError(e, "{thread} starting", threadId);
             }
         }
 
