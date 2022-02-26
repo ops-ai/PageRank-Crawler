@@ -64,8 +64,9 @@ namespace PageRankCrawler
             //TODO: merge canonical pages?
 
 
-            //TODO: calculate Page Rank
-            //https://neo4j.com/docs/graph-data-science/current/algorithms/page-rank/
+            //calculate Page Rank
+            await graphClient.Cypher.Call(@"gds.graph.create('pagerank', 'Page', 'LINKS', { })").ExecuteWithoutResultsAsync();
+            logger.LogInformation("Created named graph for page rank");
 
 
             Console.ReadKey();
