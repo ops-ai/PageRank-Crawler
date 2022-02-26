@@ -1,6 +1,9 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Neo4jClient;
+using Neo4jClient.Cypher;
+using OfficeOpenXml;
+using OfficeOpenXml.Table;
 using PageRank_Crawler;
 using PuppeteerSharp;
 using System.Collections.Concurrent;
@@ -24,10 +27,9 @@ namespace PageRankCrawler
             MainAsync(serviceProvider).GetAwaiter().GetResult();
         }
 
-        private static readonly Uri BaseUri = new("https://premierpups.com");
+        private static readonly Uri BaseUri = new("https://norcalpups.com/");
         private static readonly HashSet<string> linkBag = new();
         private static AhoCorasick.Trie trie = new();
-        AhoCorasick.Trie<string, bool> trie2 = new AhoCorasick.Trie<string, bool>();
         private static readonly ConcurrentQueue<string> links = new(new List<string> { BaseUri.ToString() });
 
         private static async Task MainAsync(ServiceProvider serviceProvider)
@@ -63,13 +65,15 @@ namespace PageRankCrawler
 
             //TODO: merge canonical pages?
 
+            //TODO: merge paging
+
 
             //calculate Page Rank
+            try { await graphClient.Cypher.Call(@"gds.graph.drop('pagerank')").ExecuteWithoutResultsAsync(); } catch { }
             await graphClient.Cypher.Call(@"gds.graph.create('pagerank', 'Page', 'LINKS', { })").ExecuteWithoutResultsAsync();
             logger.LogInformation("Created named graph for page rank");
 
-
-            Console.ReadKey();
+            await GenerateSpreadsheet(loggerFactory, graphClient, BaseUri.Host);
         }
 
         private static async Task ProcessLinksAsync(ServiceProvider serviceProvider, int threadId)
@@ -92,7 +96,7 @@ namespace PageRankCrawler
                 var browser = await Puppeteer.LaunchAsync(options);
                 var page = await browser.NewPageAsync();
 
-                var tryLimit = 5;
+                var tryLimit = 30;
                 var currentTry = 0;
 
                 while (currentTry < tryLimit)
@@ -151,15 +155,15 @@ namespace PageRankCrawler
 
                             }
 
-                            //TODO: Create relationships + score to keywords if found on page
-
+                            //Create relationships + score to keywords if found on page
+                            //TODO: Affect score based on position on the page
                             var keywordSources = new List<(string tag, string[] data, int score)>
-                        {
-                            new("a", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
-                            new("h", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
-                            new("meta", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('title,meta[name=Description]')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase() || a.content.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 5),
-                            new("img", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 3)
-                        };
+                            {
+                                new("a", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('a')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
+                                new("h", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('h1,h2,h3,h4,h5')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 4),
+                                new("meta", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('title,meta[name=Description]')).map(a => a.textContent.replace( /[\r\n]+/gm, ' ').toLowerCase() || a.content.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 5),
+                                new("img", await page.EvaluateExpressionAsync<string[]>(@"Array.from(document.querySelectorAll('img')).map(a => a.alt.replace( /[\r\n]+/gm, ' ').toLowerCase());"), 3)
+                            };
 
                             foreach (var (tag, data, score) in keywordSources)
                             {
@@ -185,7 +189,7 @@ namespace PageRankCrawler
                             }
 
                             var alreadyLinkedContent = new HashSet<string>();
-                            foreach (string word in trie.Find(await page.GetContentAsync()))
+                            foreach (string word in trie.Find(await page.GetContentAsync().ContinueWith(t => t.Result.ToLower())))
                             {
                                 if (alreadyLinkedContent.Add(word))
                                     await graphClient.Cypher
@@ -227,17 +231,83 @@ namespace PageRankCrawler
 
             var keywords = await File.ReadAllLinesAsync("keywords.txt");
             var uniqueKeywords = keywords.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.ToLower().Trim()).Distinct();
-            foreach (var keyword in uniqueKeywords)
-            {
-                var keywordInfo = new KeywordInfo { Keyword = keyword };
 
-                await graphClient.Cypher
-                .Create("(keyword:Keyword {keyword})")
-                .WithParam("keyword", keywordInfo)
+            await graphClient.Cypher
+                .Unwind(uniqueKeywords, "keywords")
+                .ForEach("(word IN keywords |")
+                .Create("(keyword:Keyword {Keyword: word}) )")
                 .ExecuteWithoutResultsAsync();
-            }
-
+                
             return uniqueKeywords;
+        }
+
+        private static async Task GenerateSpreadsheet(ILoggerFactory loggerFactory, IGraphClient graphClient, string siteUrl)
+        {
+            try
+            {
+                var logger = loggerFactory.CreateLogger<Program>();
+                logger.LogInformation("Generating analysis file");
+
+                using (var analysisFile = new FileStream($"{siteUrl}.xlsx", FileMode.Create))
+                using (var package = new ExcelPackage(analysisFile))
+                {
+                    var pageRankSheet = package.Workbook.Worksheets.Add("PageRank");
+                    var pageRankResults = await graphClient.Cypher.Call("gds.pageRank.stream('pagerank')")
+                        .Yield("nodeId, score")
+                        .Return(() => new { Url = Return.As<string>("gds.util.asNode(nodeId).Url"), Score = Return.As<float>("score") })
+                        .OrderByDescending("score").ResultsAsync;
+                    pageRankSheet.Cells["A1"].LoadFromCollection(pageRankResults, true, TableStyles.Medium4).AutoFitColumns();
+                    
+
+                    var keywordsUsedSheet = package.Workbook.Worksheets.Add("Keywords Used");
+                    var keywordsUsedResults = await graphClient.Cypher.Match("(p:Page)-[keyw:KEYUSED]->(k:Keyword)")
+                        .Return(() => new { Url = Return.As<string>("k.Keyword"), Score = Return.As<int>("SUM(keyw.Score)"), Pages = Return.As<int>("COUNT(p)") })
+                        .OrderByDescending("SUM(keyw.Score)").ResultsAsync;
+                    keywordsUsedSheet.Cells["A1"].LoadFromCollection(keywordsUsedResults, true, TableStyles.Medium4).AutoFitColumns();
+
+
+                    var nodeTypeWorkbooks = new List<(string tag, string workbookName)> 
+                    {
+                        new("a", "Keywords in links"),
+                        new("h", "Keywords in headings"),
+                        new("meta", "Keywords in meta tags"),
+                        new("img", "Keywords in img alt"),
+                        new("content", "Keywords in content"),
+                    };
+                    foreach (var type in nodeTypeWorkbooks)
+                    {
+                        var nodeTypeSheet = package.Workbook.Worksheets.Add(type.workbookName);
+                        var nodeTypeResults = await graphClient.Cypher
+                            
+                            .Match(@$"(p:Page)-[keyw:KEYUSED{{Type:""{type.tag}""}}]->(k:Keyword)")
+                            
+                            .Return(() => new { Url = Return.As<string>("k.Keyword"), Score = Return.As<int>("SUM(keyw.Score)"), Pages = Return.As<int>("COUNT(p)") })
+                            .OrderByDescending("SUM(keyw.Score)").ResultsAsync;
+                        nodeTypeSheet.Cells["A1"].LoadFromCollection(nodeTypeResults, true, TableStyles.Medium4).AutoFitColumns();
+                    }
+
+
+                    var inboundLinksSheet = package.Workbook.Worksheets.Add("Inbound Links");
+                    var inboundLinksResults = await graphClient.Cypher.Match("()-[l:LINKS]->(p:Page)")
+                        .Return(() => new { Url = Return.As<string>("p.Url"), Links = Return.As<int>("COUNT(l)") })
+                        .OrderByDescending("COUNT(l)").ResultsAsync;
+                    inboundLinksSheet.Cells["A1"].LoadFromCollection(inboundLinksResults, true, TableStyles.Medium4).AutoFitColumns();
+
+
+                    var outboundLinksSheet = package.Workbook.Worksheets.Add("Outbound Links");
+                    var outboundLinksResults = await graphClient.Cypher.Match("(p:Page)-[l:LINKS]->()")
+                        .Return(() => new { Url = Return.As<string>("p.Url"), Links = Return.As<int>("COUNT(l)") })
+                        .OrderByDescending("COUNT(l)").ResultsAsync;
+                    outboundLinksSheet.Cells["A1"].LoadFromCollection(outboundLinksResults, true, TableStyles.Medium4).AutoFitColumns();
+
+
+                    package.Save();
+                }
+            }
+            catch (Exception e)
+            {
+                throw;
+            }
         }
     }
 }
