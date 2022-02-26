@@ -21,3 +21,7 @@ Get a few Page -> Keyword relationships to see what they look like
     MATCH (n)-[:KEYUSED]->(s) RETURN n,s limit 50
 ![page to keyword relationships in neo4j](/Pages-to-keywords.png "Page to Keyword Relationships")
 
+
+
+## Use cases so far
+The crawler has led me to understand how I was accidentally creating 20*40! (20 times 40 factorial) number of pages via links while I was just trying to filter some stuff on a few pages.. thus search engines were scraping the same thing to exhaustion instead of scraping the valuable content on the site
