@@ -41,8 +41,8 @@ namespace PageRankCrawler
                 trie.Add(keyword);
             trie.Build();
 
-            await graphClient.Cypher.Create("CREATE INDEX ON :Keyword(Keyword)").ExecuteWithoutResultsAsync();
-            await graphClient.Cypher.Create("CREATE INDEX ON :Page(Url)").ExecuteWithoutResultsAsync();
+            await graphClient.Cypher.Create("INDEX ON :Keyword(Keyword)").ExecuteWithoutResultsAsync();
+            await graphClient.Cypher.Create("INDEX ON :Page(Url)").ExecuteWithoutResultsAsync();
 
             logger.LogInformation("Starting scrape!");
 
