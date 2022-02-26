@@ -13,7 +13,6 @@ Export all data into a csv
 
     CALL apoc.export.csv.all("first.csv", {})
 
-
 Get stats on what's in the database
 
     CALL apoc.meta.stats()
@@ -26,25 +25,29 @@ Get a few Page -> Keyword relationships to see what they look like
     
 ![page to keyword relationships in neo4j](/Pages-to-keywords.png "Page to Keyword Relationships")
 
+Get a list of keywords, their total score, and the number of pages they appear on, ordered by total score descending
+
+    MATCH (p:Page)-[keyw:KEYUSED]->(k:Keyword) RETURN k.Keyword, SUM(keyw.Score), COUNT(p) order by SUM(keyw.Score) desc
+
 Get a list of pages and count of inbound links
 
-    MATCH ()-[l:LINKS]->(p:Page) RETURN p.Url,COUNT(l) 
+    MATCH ()-[l:LINKS]->(p:Page) RETURN p.Url, COUNT(l) 
 
 Get a list of pages and count of outbound links
 
-    MATCH (p:Page)-[l:LINKS]->() RETURN p.Url,COUNT(l) 
+    MATCH (p:Page)-[l:LINKS]->() RETURN p.Url, COUNT(l) 
 
 Get a list of keywords, total score and number of pages they're found on
 
-    MATCH (p:Page)-[keyw:KEYUSED]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score),COUNT(p)
+    MATCH (p:Page)-[keyw:KEYUSED]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score), COUNT(p)
 
 Get a list of keywords found in alt attributes of images, total score and number of pages they're found on
 
-    MATCH (p:Page)-[keyw:KEYUSED{Type:'img'}]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score),COUNT(p) 
+    MATCH (p:Page)-[keyw:KEYUSED{Type:'img'}]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score), COUNT(p) 
 
 Get a list of keywords found in anchor tags, total score and number of pages they're found on
 
-    MATCH (p:Page)-[keyw:KEYUSED{Type:'a'}]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score),COUNT(p) 
+    MATCH (p:Page)-[keyw:KEYUSED{Type:'a'}]->(k:Keyword) RETURN k.Keyword,SUM(keyw.Score), COUNT(p) 
 
 ### Calculate page rank
 
