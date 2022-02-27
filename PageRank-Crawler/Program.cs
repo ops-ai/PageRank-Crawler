@@ -38,6 +38,13 @@ namespace PageRankCrawler
             var logger = loggerFactory.CreateLogger<Program>();
             var graphClient = serviceProvider.GetRequiredService<IGraphClient>();
 
+            var existingPages = await graphClient.Cypher.Match("(p:Page)").Return<string>("p.Url").ResultsAsync;
+            if (existingPages.Any())
+            {
+                logger.LogError("Database not clean");
+                return;
+            }
+
             var uniqueKeywords = await CreateKeywordNodesAsync(loggerFactory, graphClient);
             foreach (var keyword in uniqueKeywords)
                 trie.Add(keyword);
