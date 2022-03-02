@@ -9,16 +9,24 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="C:\Users\AlexandruPuiu\.nuget\packages\nlog.config\4.7.14\contentFiles\any\any\NLog.config" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="EPPlus" Version="4.5.3.3" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="6.0.0" />
     <PackageReference Include="Neo4jClient" Version="4.1.20" />
     <PackageReference Include="Neo4jClient.Extension" Version="1.0.2" />
+    <PackageReference Include="NLog.Extensions.Logging" Version="1.7.4" />
     <PackageReference Include="PuppeteerSharp" Version="6.2.0" />
   </ItemGroup>
 
   <ItemGroup>
     <None Update="keywords.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="nlog.config">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
