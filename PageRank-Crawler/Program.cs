@@ -18,6 +18,8 @@ namespace PageRankCrawler
             var graphClient = new GraphClient(new Uri("http://localhost:7474/db/data/"), "neo4j", "P@ssw0rd1");
             graphClient.ConnectAsync().ConfigureAwait(false).GetAwaiter().GetResult();
 
+            BaseUri = new Uri(args[0]);
+
             var serviceProvider = new ServiceCollection()
                 .AddLogging(config => config.AddConsole().AddNLog())
                 .AddSingleton<IGraphClient>(graphClient)
@@ -26,7 +28,7 @@ namespace PageRankCrawler
             MainAsync(serviceProvider).ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
-        private static readonly Uri BaseUri = new("https://premierpups.com/");
+        private static Uri BaseUri;
         private static readonly HashSet<string> linkBag = new();
         private static AhoCorasick.Trie trie = new();
         private static readonly ConcurrentQueue<string> links = new(new List<string> { BaseUri.ToString() });
@@ -112,9 +114,10 @@ namespace PageRankCrawler
                 {
                     Headless = true,
                     ExecutablePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                    Product = Product.Chrome
+                    Product = Product.Chrome,
+                    DefaultViewport = new ViewPortOptions { HasTouch = true, IsMobile = true, Width = 375, Height = 812, IsLandscape = false },
                 };
-                var browser = await Puppeteer.LaunchAsync(options).ConfigureAwait(false);
+                var browser = await Puppeteer.LaunchAsync(options, loggerFactory).ConfigureAwait(false);
                 
                 var page = await browser.NewPageAsync().ConfigureAwait(false);
                 

@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "PageRank-Crawler": {
+      "commandName": "Project",
+      "commandLineArgs": "https://example.com"
+    }
+  }
+}
