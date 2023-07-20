@@ -11,8 +11,13 @@ using System.Collections.Concurrent;
 
 namespace PageRankCrawler
 {
-    public class Program
+    public static class Program
     {
+        private static Uri BaseUri;
+        private static readonly HashSet<string> linkBag = new();
+        private static AhoCorasick.Trie trie = new();
+        private static readonly ConcurrentQueue<string> links = new();
+
         public static void Main(string[] args)
         {
             var graphClient = new GraphClient(new Uri("http://localhost:7474/db/data/"), "neo4j", "P@ssw0rd1");
@@ -25,25 +30,22 @@ namespace PageRankCrawler
                 .AddSingleton<IGraphClient>(graphClient)
                 .BuildServiceProvider();
 
-            MainAsync(serviceProvider).ConfigureAwait(false).GetAwaiter().GetResult();
+            MainAsync(serviceProvider, args[0]).ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
-        private static Uri BaseUri;
-        private static readonly HashSet<string> linkBag = new();
-        private static AhoCorasick.Trie trie = new();
-        private static readonly ConcurrentQueue<string> links = new(new List<string> { BaseUri.ToString() });
-
-        private static async Task MainAsync(ServiceProvider serviceProvider)
+        private static async Task MainAsync(ServiceProvider serviceProvider, string baseUrl)
         {
             var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
-            var logger = loggerFactory.CreateLogger<Program>();
+            var logger = loggerFactory.CreateLogger("Program");
             var graphClient = serviceProvider.GetRequiredService<IGraphClient>();
+
+            links.Enqueue(baseUrl);
 
             var existingPages = await graphClient.Cypher.Match("(p:Page)").Return<string>("p.Url").ResultsAsync.ConfigureAwait(false);
             if (existingPages.Any())
             {
-                logger.LogError("Database not clean");
-                return;
+                logger.LogError("Database not clean, deleting everything");
+                await graphClient.Cypher.Match("(n)").DetachDelete("n").ExecuteWithoutResultsAsync();
             }
 
             var uniqueKeywords = await CreateKeywordNodesAsync(loggerFactory, graphClient).ConfigureAwait(false);
@@ -102,7 +104,7 @@ namespace PageRankCrawler
         private static async Task ProcessLinksAsync(ServiceProvider serviceProvider, int threadId)
         {
             var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
-            var logger = loggerFactory.CreateLogger<Program>();
+            var logger = loggerFactory.CreateLogger("Program");
 
             try
             {
@@ -137,7 +139,7 @@ namespace PageRankCrawler
                         try
                         {
                             logger.LogInformation("{threadId} Getting url {nextUrl}", threadId, nextUrl);
-                            Response? pageNav = null;
+                            IResponse? pageNav = null;
 
                             var tries = 0;
                             do
@@ -151,7 +153,7 @@ namespace PageRankCrawler
                                     logger.LogError(ex, "Error navigating to page");
                                     tries++;
                                 }
-                            } while (pageNav == null || tries < 3);
+                            } while (pageNav == null && tries < 3);
 
                             if (pageNav == null)
                             {
@@ -316,7 +318,7 @@ namespace PageRankCrawler
 
         private static async Task<IEnumerable<string>> CreateKeywordNodesAsync(ILoggerFactory loggerFactory, IGraphClient graphClient)
         {
-            var logger = loggerFactory.CreateLogger<Program>();
+            var logger = loggerFactory.CreateLogger("Program");
             logger.LogInformation("Creating keyword nodes");
 
             var keywords = await File.ReadAllLinesAsync("keywords.txt").ConfigureAwait(false);
@@ -336,7 +338,7 @@ namespace PageRankCrawler
         {
             try
             {
-                var logger = loggerFactory.CreateLogger<Program>();
+                var logger = loggerFactory.CreateLogger("Program");
                 logger.LogInformation("Generating analysis file");
 
                 using (var analysisFile = new FileStream($"{siteUrl}.xlsx", FileMode.Create))
